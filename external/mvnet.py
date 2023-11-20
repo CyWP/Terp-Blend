@@ -64,13 +64,14 @@ core = [leftshoulder, rightshoulder, lefthip, righthip]
 delta_buffer = np.zeros((len(extremities), BUF_SIZE, 3), dtype=float)
 prev_pos = np.zeros(shape=(len(extremities),3), dtype=float)
 
-def launchmvnet(webcam, webindex, vidpath, wekosc, blendosc, wait, duration, show):
+def launchmvnet(webcam, webindex, vidpath, tfpath, wekosc, blendosc, wait, duration, show):
 #Load Model
-    interpreter = tf.lite.Interpreter(model_path='lite-model_movenet_singlepose_lightning_3.tflite')
+    interpreter = tf.lite.Interpreter(model_path=tfpath)
     interpreter.allocate_tensors()
     ip="127.0.0.1"
     wekclient = SimpleUDPClient(ip, wekosc)
     blendclient = SimpleUDPClient(ip, blendosc)
+    global frames
     #Capture video
     if webcam:
         try:
@@ -83,6 +84,8 @@ def launchmvnet(webcam, webindex, vidpath, wekosc, blendosc, wait, duration, sho
     start = time.time()
     while cap.isOpened():
         ret, frame = cap.read()
+        if frame is None:
+            break
         # Reshape image
         img = frame.copy()
         img = tf.image.resize_with_pad(np.expand_dims(img, axis=0), 192,192)
@@ -137,16 +140,18 @@ def format_tensor(keypoints):
    return np.asarray(np.delete(keypoints[0], np.s_[::3], None), dtype=float)
 
 #Pathetic way to extract an estimation of the direction of the fastest moving extremity, estimates 3d location from 2d data
-def pose_to_vector(kp):
-    index = frames % BUF_SIZE + 1
-    len = len(extremities)
-    speeds = np.ndarray(shape=(len,))
+def pose_to_vector(keypoints):
+    index = (frames+1) % BUF_SIZE
+    length = len(extremities)
+    speeds = np.ndarray(shape=(length,))
     zero = [0, 0, 0]
+    kp = keypoints[0][0]
+    position = np.zeros(kp.shape, dtype=np.float32)
     #Set new values for each category
-    for i in range(len):
+    for i in range(length):
         #get 3d vector of every extremity, implies interpolating y val
-        position = np.ndarray(kp[extremities[i][0]], 0, kp[extremities[i][1]])
-        coreheight = 1.25*dist([kp[core[i]][0], kp[core[i]][1]],[kp[core[(i+2)%len]][0], kp[core[(i+2)%len]][1]])
+        position = [kp[extremities[i]][0], 0., kp[extremities[i]][1]]
+        coreheight = 1.25*dist([kp[core[i]][0], kp[core[i]][1]],[kp[core[(i+2)%length]][0], kp[core[(i+2)%length]][1]])
         position[1] = coreheight*(1-(dist([kp[core[i]][0], kp[core[i]][1]], [kp[joints[i]][0], kp[joints[i]][1]])+dist([kp[joints[i]][0], kp[joints[i]][1]], [kp[extremities[i]][0], kp[extremities[i]][1]]))/coreheight)
         #Reverses y direction if facing backwards
         if kp[leftshoulder][0]>kp[rightshoulder][0]:
@@ -155,15 +160,18 @@ def pose_to_vector(kp):
         delta_buffer[i][index] = position-prev_pos[i]
         prev_pos[i] = position
         #Register averaged speed
-        speeds[i] = 0.1*dist(zero, delta_buffer[(index-3)%BUF_SIZE])+0.2*dist(zero, delta_buffer[(index-2)%BUF_SIZE])+0.3*dist(zero, delta_buffer[(index-1)%BUF_SIZE])+0.4*dist(zero, delta_buffer[(index)%BUF_SIZE])
+        speeds[i] = 0.1*dist(zero, delta_buffer[i][(index-3)%BUF_SIZE])+0.2*dist(zero, delta_buffer[i][(index-2)%BUF_SIZE])+0.3*dist(zero, delta_buffer[i][(index-1)%BUF_SIZE])+0.4*dist(zero, delta_buffer[i][(index)%BUF_SIZE])
     #find largest index
-    max = speeds[i]
+    maxsp = speeds[i]
     maxi = 0
     for i in range (len(speeds)):
-        if speeds[i]>max:
-            max = speeds[i]
+        if speeds[i]>maxsp:
+            maxsp = speeds[i]
             maxi = i
     #Set/reset counters, return 3d vector value
+    global active
+    global same_count
+    global diff_count
     if maxi == active:
         same_count += 1
         if same_count == DIFF_RESET:
@@ -174,6 +182,7 @@ def pose_to_vector(kp):
         if diff_count == DIFF_MAX:
             diff_count = 0
             active = maxi
+    print(delta_buffer[active][index])
     return np.asarray(delta_buffer[active][index], dtype=float)
 
 def camtimer(wait, cap):
