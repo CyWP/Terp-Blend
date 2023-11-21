@@ -1,7 +1,11 @@
 #This file holds everything
 import bpy
+import bmesh
 from bpy.types import Context
-import pythonosc
+from pythonosc.osc_server import AsyncIOOSCUDPServer
+from pythonosc.dispatcher import Dispatcher
+import asyncio
+import time
 
 categories = []
 operations = [("Move", "Move", "Move selected face along vector projected onto face normal"),("Uniform Scale", "Uniform Scale", "Uniformly scale selected face"),
@@ -29,7 +33,7 @@ bl_info = {
     "category": "Edit Mesh",
 }
 
-class add_category(bpy.types.Operator):
+class AddCategory(bpy.types.Operator):
     bl_idname = "add.category"
     bl_label = "Add Category"
 
@@ -38,7 +42,7 @@ class add_category(bpy.types.Operator):
         categories.append(mytool.ops)
         return{'FINISHED'}
 
-class remove_category(bpy.types.Operator):
+class RemoveCategory(bpy.types.Operator):
     bl_idname = "remove.category"
     bl_label = "Remove Category"
 
@@ -47,7 +51,7 @@ class remove_category(bpy.types.Operator):
         categories.pop()
         return{'FINISHED'}
     
-class map_category(bpy.types.Operator):
+class MapCategory(bpy.types.Operator):
     bl_idname = "map.category"
     bl_label= "Map category to operation"
 
@@ -57,11 +61,45 @@ class map_category(bpy.types.Operator):
         categories[int(cat)] = op
         return{'FINISHED'}
 
+def category_handler(address, *args):
+    print(f"{address}: {args}")
+    
+def vector_handler(address, *args):
+    print(f"{address}: {args}")
+
+def end_handler(address, *args):
+    bpy.context.scene.panel_tool.end = True
+class Listen(bpy.types.Operator):
+    bl_idname = "listen.osc"
+    bl_label = "Start Listening OSC"
+
+    async def loop(self, context):
+        while not context.scene.panel_tool.end:
+            await asyncio.sleep(1)
+
+    async def init_main(ip, port, dispatcher, self, context):
+        server = AsyncIOOSCUDPServer((ip, port), dispatcher, asyncio.get_event_loop())
+        transport, protocol = await server.create_serve_endpoint()  # Create datagram endpoint and start serving
+        await Listen.loop(self, context)  # Enter main loop of program
+        transport.close()  # Clean up serve endpoint
+
+    def execute(self, context):
+        dispatcher = Dispatcher()
+        dispatcher.map("/wek/outputs", category_handler)
+        dispatcher.map("/vec", vector_handler)
+        dispatcher.map("/end", end_handler)
+        ip = "127.0.0.1"
+        port = context.scene.panel_tool.osc
+        asyncio.run(Listen.init_main(ip, port, dispatcher, self, context))
+        bpy.context.scene.panel_tool.end = False
+        return{'FINISHED'}
+
 class PanelProperties(bpy.types.PropertyGroup):
-    osc: bpy.props.IntProperty(name= "OSC", default=6449)
+    osc: bpy.props.IntProperty(name= "OSC", default=12000)
     new_cat: bpy.props.StringProperty(name="", default="new_category")
     ops: bpy.props.EnumProperty(name="", description="List of mappable mesh operators", items = operations)
-
+    end: bpy.props.BoolProperty(name="", default=False)
+    vec: bpy.props.FloatVectorProperty(name="", default=[0.0, 0.0, 0.0])
 class MainPanel(bpy.types.Panel):
     #Panel variables
     bl_label = "Terpsichore v0.0"
@@ -78,7 +116,7 @@ class MainPanel(bpy.types.Panel):
         mytool = scene.panel_tool
 
         row = self.layout.row()
-        row.operator('mesh.primitive_cube_add', text= "Listen", icon="ARMATURE_DATA")
+        row.operator('listen.osc', text= "Listen", icon="ARMATURE_DATA")
         row.prop(mytool, "osc")
         row.operator('mesh.primitive_cube_add', text= "", icon="PAUSE")
         row = self.layout.row()
@@ -136,7 +174,7 @@ class MapPanel(bpy.types.Panel):
                 m.label(text="", icon='ARROW_LEFTRIGHT')
                 r.label(text=categories[i])
 
-classes = [PanelProperties, MainPanel, MapPanel, add_category, remove_category, map_category]
+classes = [PanelProperties, MainPanel, MapPanel, AddCategory, RemoveCategory, MapCategory, Listen]
     
 def register():
     for cls in classes:

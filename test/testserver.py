@@ -10,7 +10,6 @@ def filter_handler(address, *args):
 dispatcher = Dispatcher()
 dispatcher.map("/wek/inputs", filter_handler)
 dispatcher.map("/vec", filter_handler)
-
 ip = "127.0.0.1"
 port = 6448
 
@@ -25,9 +24,7 @@ async def loop():
 async def init_main():
     server = AsyncIOOSCUDPServer((ip, port), dispatcher, asyncio.get_event_loop())
     transport, protocol = await server.create_serve_endpoint()  # Create datagram endpoint and start serving
-
     await loop()  # Enter main loop of program
-
     transport.close()  # Clean up serve endpoint
 
 

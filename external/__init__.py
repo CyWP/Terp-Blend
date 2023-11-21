@@ -7,7 +7,7 @@ root = Tk()  # create a root widget
 webcam = BooleanVar(root, True)
 show = BooleanVar(root, True)
 vidpath =StringVar(root, "C:/Users/thoma/Documents/FALL23\CART398\Final/test.mp4")
-tfpath =StringVar(root, "C:/Users/thoma/Documents/FALL23/CART398/Finallite-model_movenet_singlepose_lightning_3.tflite")
+tfpath =StringVar(root, "C:/Users/thoma/Documents/FALL23/CART398/Final/lite-model_movenet_singlepose_lightning_3.tflite")
 #Utils/Operators
 def toggle_webcam():
     new = not(webcam.get())

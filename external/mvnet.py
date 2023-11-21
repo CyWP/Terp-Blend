@@ -71,6 +71,7 @@ def launchmvnet(webcam, webindex, vidpath, tfpath, wekosc, blendosc, wait, durat
     ip="127.0.0.1"
     wekclient = SimpleUDPClient(ip, wekosc)
     blendclient = SimpleUDPClient(ip, blendosc)
+    endclient = SimpleUDPClient(ip, blendosc)
     global frames
     #Capture video
     if webcam:
@@ -111,7 +112,8 @@ def launchmvnet(webcam, webindex, vidpath, tfpath, wekosc, blendosc, wait, durat
             cv2.imshow('Press q to quit', frame)
         #Press q to exit
         if cv2.waitKey(10) & 0xFF==ord('q') or (webcam and time.time()-start>=duration):
-            break           
+            break
+    endclient.send_message("/end", 1)           
     cap.release()
     cv2.destroyAllWindows()
 
