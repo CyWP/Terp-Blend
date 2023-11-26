@@ -36,7 +36,7 @@ def browseTfFiles():
     tfpath.set(filename)
 
 def launch():
-    launchmvnet(webcam.get(), index_entry.get(), vidpath.get(), tfpath.get(), int(wek_entry.get()), int(blend_entry.get()), int(delay_entry.get()), int(duration_entry.get()), show.get())
+    launchmvnet(webcam.get(), int(index_entry.get()), vidpath.get(), tfpath.get(), int(wek_entry.get()), int(blend_entry.get()), int(delay_entry.get()), int(duration_entry.get()), show.get())
 
 #Build Panel
 root.title("Terpsichore v0.0 (Powered by MoveNet Lightning)")

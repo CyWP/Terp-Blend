@@ -5,7 +5,60 @@ from bpy.types import Context
 from pythonosc.osc_server import AsyncIOOSCUDPServer
 from pythonosc.dispatcher import Dispatcher
 import asyncio
-import time
+import random
+import numpy as np
+import contextlib
+
+@contextlib.contextmanager
+def get_bmesh(obj):
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    yield bm
+    bm.normal_update()
+    bm.to_mesh(obj.data)
+    obj.data.update()
+    bm.free()
+
+def move_face(self, context):
+    print("move")
+    global selface
+    print(selface)
+    optool = bpy.context.scene.op_tool
+    with get_bmesh(context.active_object) as bm:
+        bmesh.ops.translate(bm, vec=optool.vec, verts=selface[0].verts)
+
+def extrude_face(self, context):
+    print("extrude")
+    global selface
+    optool = bpy.context.scene.op_tool
+    with get_bmesh(context.active_object) as bm:
+        bmesh.ops.extrude_discrete_faces(bm, faces=selface, use_normal_flip=False, use_select_history=False)
+        bmesh.ops.translate(bm, vec=optool.vec, verts=selface[0].verts)
+
+def vscale_face(self, context):
+    print("vscale")
+    global selface
+    optool = bpy.context.scene.op_tool
+    with get_bmesh(context.active_object) as bm:
+        bmesh.ops.scale(bm, vec=optool.vec, verts=selface[0].verts)
+
+def align_to_normal(vec, face):
+    return np.matmul(vec, rotation_matrix(face.normal, vec))
+
+def rotation_matrix(vec1, vec2):
+    """ Find the rotation matrix that aligns vec1 to vec2
+    :param vec1: A 3d "source" vector
+    :param vec2: A 3d "destination" vector
+    :return mat: A transform matrix (3x3) which when applied to vec1, aligns it with vec2.
+    """
+    a, b = (vec1 / np.linalg.norm(vec1)).reshape(3), (vec2 / np.linalg.norm(vec2)).reshape(3)
+    v = np.cross(a, b)
+    c = np.dot(a, b)
+    s = np.linalg.norm(v)
+    kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    rotation_matrix = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s ** 2))
+    return rotation_matrix
+    
 
 categories = []
 operations = [("Move", "Move", "Move selected face along vector projected onto face normal"),("Uniform Scale", "Uniform Scale", "Uniformly scale selected face"),
@@ -14,6 +67,9 @@ operations = [("Move", "Move", "Move selected face along vector projected onto f
              ("Push/Pull", "Push/Pull", "Push/Pull selected face's vertices (push if val>0, pull if val<0)"),("Inset", "Inset", "Inset selected face"),
              ("Select", "Select", "Select face closest to vector using current selected face as origin"),("Randomize", "Randomize", "Translate vertice coordinates along random vectors"),
              ("Shear", "Shear", "Shear face along direction most similar to vector"), ("Smooth", "Smooth", "Smooth angles between selected and neighbouring faces")]
+mappings = {"Move": move_face, "Extrude": extrude_face, "Vector Scale": vscale_face}
+defs = []
+selface = []
 
 def generate_categories(self, context):
     enum = []    
@@ -41,13 +97,11 @@ class AddCategory(bpy.types.Operator):
         mytool = context.scene.panel_tool
         categories.append(mytool.ops)
         return{'FINISHED'}
-
 class RemoveCategory(bpy.types.Operator):
     bl_idname = "remove.category"
     bl_label = "Remove Category"
 
     def execute(self, context):
-        mytool = context.scene.panel_tool
         categories.pop()
         return{'FINISHED'}
     
@@ -61,21 +115,61 @@ class MapCategory(bpy.types.Operator):
         categories[int(cat)] = op
         return{'FINISHED'}
 
+def map_defs():
+    for i in categories:
+        defs.append(mappings[i])
+
+def operate(self, context):
+    print("operate")
+    global defs
+    print(defs)
+    defs[context.scene.op_tool.currentcat](self, context)
+
+DIFFRESET=5
+DIFFMAX=3
+samecount=0
+diffcount=DIFFMAX-1
+
 def category_handler(address, *args):
-    print(f"{address}: {args}")
+    print(args[0])
+    currclass=bpy.context.scene.op_tool.currentcat
+    global samecount
+    global diffcount
+    i = int(args[0]-1)
+    if i==currclass:
+        samecount+=1
+        if samecount==DIFFRESET:
+            diffcount=0
+    else:
+        diffcount += 1
+        if diffcount==DIFFMAX:
+            diffcount=0
+            samecount=0
+            currclass=i
+    currclass=i
     
 def vector_handler(address, *args):
-    print(f"{address}: {args}")
+    bpy.context.scene.op_tool.vec=[args[0], args[1], args[2]]
 
 def end_handler(address, *args):
-    bpy.context.scene.panel_tool.end = True
+    bpy.context.scene.op_tool.end = True
+
+def start_handler(address, *args):
+    bpy.context.scene.op_tool.start = True
 class Listen(bpy.types.Operator):
     bl_idname = "listen.osc"
     bl_label = "Start Listening OSC"
 
     async def loop(self, context):
-        while not context.scene.panel_tool.end:
+        mytool = context.scene.op_tool
+        while not mytool.start:
+            print("wait")
             await asyncio.sleep(1)
+        mytool.start = False
+        while not mytool.end:
+            print("exec")
+            operate(self, context)
+            await asyncio.sleep(0.1)
 
     async def init_main(ip, port, dispatcher, self, context):
         server = AsyncIOOSCUDPServer((ip, port), dispatcher, asyncio.get_event_loop())
@@ -84,22 +178,43 @@ class Listen(bpy.types.Operator):
         transport.close()  # Clean up serve endpoint
 
     def execute(self, context):
+        #map functions for execution
+        map_defs()
+        #Setup OSC server
         dispatcher = Dispatcher()
+        dispatcher.map("/start", start_handler)
         dispatcher.map("/wek/outputs", category_handler)
         dispatcher.map("/vec", vector_handler)
         dispatcher.map("/end", end_handler)
+        global selface
         ip = "127.0.0.1"
         port = context.scene.panel_tool.osc
+        selface.clear()
+        with get_bmesh(context.object) as bm:
+            rand = random.randint(0, len(bm.faces)-1)
+            bm.faces.ensure_lookup_table()
+            selface.append(bm.faces[rand])
+        #run
         asyncio.run(Listen.init_main(ip, port, dispatcher, self, context))
-        bpy.context.scene.panel_tool.end = False
+        #reset variable used to stop the loop
+        bpy.context.scene.op_tool.end = False
+        #clear function mapping
+        defs.clear()
+        #back to object mode
+        bpy.ops.object.mode_set(mode = 'OBJECT')
         return{'FINISHED'}
 
 class PanelProperties(bpy.types.PropertyGroup):
     osc: bpy.props.IntProperty(name= "OSC", default=12000)
     new_cat: bpy.props.StringProperty(name="", default="new_category")
     ops: bpy.props.EnumProperty(name="", description="List of mappable mesh operators", items = operations)
+
+class OperationProperties(bpy.types.PropertyGroup):
+    start :bpy.props.BoolProperty(name="", default=False)
     end: bpy.props.BoolProperty(name="", default=False)
     vec: bpy.props.FloatVectorProperty(name="", default=[0.0, 0.0, 0.0])
+    currentcat: bpy.props.IntProperty(name="", default=0)
+
 class MainPanel(bpy.types.Panel):
     #Panel variables
     bl_label = "Terpsichore v0.0"
@@ -174,12 +289,13 @@ class MapPanel(bpy.types.Panel):
                 m.label(text="", icon='ARROW_LEFTRIGHT')
                 r.label(text=categories[i])
 
-classes = [PanelProperties, MainPanel, MapPanel, AddCategory, RemoveCategory, MapCategory, Listen]
+classes = [PanelProperties, OperationProperties, MainPanel, MapPanel, AddCategory, RemoveCategory, MapCategory, Listen]
     
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.panel_tool = bpy.props.PointerProperty(type= PanelProperties)
+    bpy.types.Scene.op_tool = bpy.props.PointerProperty(type=OperationProperties)
     bpy.types.Scene.catenum = bpy.props.EnumProperty(items=generate_categories, name="Categories")
 
 def unregister():

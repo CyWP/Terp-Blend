@@ -72,6 +72,8 @@ def launchmvnet(webcam, webindex, vidpath, tfpath, wekosc, blendosc, wait, durat
     wekclient = SimpleUDPClient(ip, wekosc)
     blendclient = SimpleUDPClient(ip, blendosc)
     endclient = SimpleUDPClient(ip, blendosc)
+    startclient = SimpleUDPClient(ip, blendosc)
+    startclient.send_message("/start", 1)
     global frames
     #Capture video
     if webcam:
