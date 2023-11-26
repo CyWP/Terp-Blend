@@ -1,13 +1,14 @@
 #This file holds everything
 import bpy
 import bmesh
-from bpy.types import Context
+from bpy.types import Context, Event
 from pythonosc.osc_server import AsyncIOOSCUDPServer
 from pythonosc.dispatcher import Dispatcher
 import asyncio
 import random
 import numpy as np
 import contextlib
+import time
 from typing import List, Any
 
 def align_to_normal(vec, face):
@@ -88,7 +89,7 @@ class Listen(bpy.types.Operator):
         self.diffmax=3
         self.samecount=0
         self.diffcount=self.diffmax-1
-        self.currclass = -1
+        self.currclass = 0
         self.vec = [0.0 ,0.0 ,0.0]
         self.face = []
         self.defs=[]
@@ -106,8 +107,9 @@ class Listen(bpy.types.Operator):
         bm.free()
 
     def category_handler(address: str, fixed_argument: List[Any], *osc_arguments: List[Any]) -> None:
+        print(osc_arguments[1])
         self, context = osc_arguments[0] 
-        i = int(osc_arguments[0]-1)
+        i = int(osc_arguments[1]-1)
         if i==self.currclass:
             self.samecount+=1
             if self.samecount==self.diffreset:
@@ -120,8 +122,7 @@ class Listen(bpy.types.Operator):
                 self.currclass=i
 
     def vector_handler(address: str, fixed_argument: List[Any],*osc_arguments: List[Any]) -> None:
-        print("oscargs")
-        print(osc_arguments[0])
+        print(osc_arguments[1])
         self, context = osc_arguments[0]  
         self.vec=[osc_arguments[1], osc_arguments[2], osc_arguments[3]]
 
@@ -136,15 +137,13 @@ class Listen(bpy.types.Operator):
     async def loop(self, context):
         mytool = context.scene.op_tool
         while not mytool.start:
-            print("wait")
             await asyncio.sleep(1)
         mytool.start = False
         while not mytool.end:
-            print("exec")
-            self.operate(context)
-            await asyncio.sleep(0.1)
+            self.modal(context)
 
     async def init_main(ip, port, dispatcher, self, context):
+        print("initmain")
         server = AsyncIOOSCUDPServer((ip, port), dispatcher, asyncio.get_event_loop())
         transport, protocol = await server.create_serve_endpoint()  # Create datagram endpoint and start serving
         await self.loop(context)  # Enter main loop of program
@@ -155,13 +154,29 @@ class Listen(bpy.types.Operator):
             self.defs.append(self.mappings[i])
 
     def modal(self, context, event):
+        print(event.type)
         if event.type in {'ESC', 'DEL'}:
+            bpy.context.scene.op_tool.end = False
+            #clear function mapping
+            self.defs.clear()
             return {'CANCELLED'}
-        return {'RUNNING_MODAL'}
-
-    def execute(self, context):
+        elif bpy.context.scene.op_tool.end:
+            bpy.context.scene.op_tool.end = False
+            #clear function mapping
+            self.defs.clear()
+            print('MODAL')
+            return {'FINISHED'}
+        elif event.type =='MOUSEMOVE':
+            #await asyncio.sleep(0.1)
+            self.execute(context)
+            time.sleep(0.1)
+        return {'PASS_THROUGH'}
+    
+    def invoke(self, context, event):
         #map functions for execution
+        context.window_manager.modal_handler_add(self)
         self.map_defs()
+        print("invoked")
         #Setup OSC server
         dispatcher = Dispatcher()
         dispatcher.map("/start", self.start_handler, self, context)
@@ -175,22 +190,19 @@ class Listen(bpy.types.Operator):
             rand = random.randint(0, len(bm.faces)-1)
             bm.faces.ensure_lookup_table()
             self.face.append(bm.faces[rand])
-        #run
-        asyncio.run(Listen.init_main(ip, port, dispatcher, self, context))
-        #reset variable used to stop the loop
-        bpy.context.scene.op_tool.end = False
-        #clear function mapping
-        self.defs.clear()
-        return{'FINISHED'}
-    
-    def operate(self, context):
-        print("operate")
-        print(self.defs)
+        #run   
+        asyncio.run(self.init_main(port, dispatcher, self, context))
+        '''self.server = AsyncIOOSCUDPServer((ip, port), dispatcher, asyncio.get_event_loop())
+        self.server.serve()'''
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
         self.defs[self.currclass](context)
+        return {'RUNNING_MODAL'}
     
     def move_face(self, context):
-        print("move")
         optool = bpy.context.scene.op_tool
+        print("move")
         with self.get_bmesh(context.active_object) as bm:
             #bmesh.ops.translate(bm, vec=self.vec, verts=self.face[0].verts)
             bm.faces.ensure_lookup_table()
@@ -199,7 +211,6 @@ class Listen(bpy.types.Operator):
             bm.to_mesh(context.active_object.data)
             context.active_object.data.update()
             bm.free()'''
-        return
 
     def extrude_face(self, context):
         print("extrude")
