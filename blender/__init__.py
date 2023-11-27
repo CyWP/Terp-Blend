@@ -54,7 +54,30 @@ bl_info = {
     "wiki_url": "",
     "category": "Edit Mesh",
 }
+class Dummy(bpy.types.Operator):
+    bl_idname = "dum.my"
+    bl_label = "Add Category"
 
+    @contextlib.contextmanager
+    def get_bmesh(self, context, obj):
+        bm = bmesh.new()
+        bm.from_mesh(obj.data)
+        yield bm
+        bm.normal_update()
+        bm.to_mesh(obj.data)
+        obj.data.update()
+        bm.free()
+
+    def execute(self, context):
+        for i in range(10):
+            optool = bpy.context.scene.op_tool
+            with self.get_bmesh(context, context.active_object) as bm:
+                #bmesh.ops.translate(bm, vec=self.vec, verts=self.face[0].verts)
+                bm.faces.ensure_lookup_table()
+                bmesh.ops.translate(bm, vec=[0,0,1], verts=bm.faces[0].verts)
+                time.sleep(0.3)
+            bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+        return {'FINISHED'}
 class AddCategory(bpy.types.Operator):
     bl_idname = "add.category"
     bl_label = "Add Category"
@@ -91,23 +114,23 @@ class Listen(bpy.types.Operator):
         self.diffcount=self.diffmax-1
         self.currclass = 0
         self.vec = [0.0 ,0.0 ,0.0]
-        self.face = []
+        self.face = 0
         self.defs=[]
-        self.mappings = {"Move": self.move_face, "Extrude": self.extrude_face, "Vector Scale": self.vscale_face}
+        self.mappings = {"Move": self.move_face, "Extrude": self.extrude_face, "Vector Scale": self.vscale_face, "Select": self.select_face}
 
     @contextlib.contextmanager
-    def get_bmesh(self, obj):
+    def get_bmesh(self, context, obj):
         bm = bmesh.new()
         bm.from_mesh(obj.data)
+        bm.faces.ensure_lookup_table()
         yield bm
         bm.normal_update()
         bm.to_mesh(obj.data)
         obj.data.update()
-        bpy.context.view_layer.depsgraph.update()
+        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
         bm.free()
 
     def category_handler(address: str, fixed_argument: List[Any], *osc_arguments: List[Any]) -> None:
-        print(osc_arguments[1])
         self, context = osc_arguments[0] 
         i = int(osc_arguments[1]-1)
         if i==self.currclass:
@@ -122,9 +145,8 @@ class Listen(bpy.types.Operator):
                 self.currclass=i
 
     def vector_handler(address: str, fixed_argument: List[Any],*osc_arguments: List[Any]) -> None:
-        print(osc_arguments[1])
         self, context = osc_arguments[0]  
-        self.vec=[osc_arguments[1], osc_arguments[2], osc_arguments[3]]
+        self.vec=[self.strength[0]*self.coef*osc_arguments[1], self.strength[1]*self.coef*osc_arguments[2], self.strength[2]*self.coef*osc_arguments[3]]
 
     def end_handler(address: str, fixed_argument: List[Any], *osc_arguments: List[Any]) -> None:
         self, context = osc_arguments[0] 
@@ -137,15 +159,17 @@ class Listen(bpy.types.Operator):
     async def loop(self, context):
         mytool = context.scene.op_tool
         while not mytool.start:
+            print("wait")
             await asyncio.sleep(1)
         mytool.start = False
         while not mytool.end:
-            self.modal(context)
+            await asyncio.sleep(0.06)
+            self.modal(context, None)
 
-    async def init_main(ip, port, dispatcher, self, context):
+    async def init_main(self, context):
         print("initmain")
-        server = AsyncIOOSCUDPServer((ip, port), dispatcher, asyncio.get_event_loop())
-        transport, protocol = await server.create_serve_endpoint()  # Create datagram endpoint and start serving
+        self.server = AsyncIOOSCUDPServer((self.ip, self.port), self.dispatcher, asyncio.get_event_loop())
+        transport, protocol = await self.server.create_serve_endpoint()  # Create datagram endpoint and start serving
         await self.loop(context)  # Enter main loop of program
         transport.close()  # Clean up serve endpoint
 
@@ -154,8 +178,10 @@ class Listen(bpy.types.Operator):
             self.defs.append(self.mappings[i])
 
     def modal(self, context, event):
-        print(event.type)
-        if event.type in {'ESC', 'DEL'}:
+        if event is None:
+            self.execute(context)
+            return {'RUNNING_MODAL'}
+        elif event.type in {'ESC', 'DEL'}:
             bpy.context.scene.op_tool.end = False
             #clear function mapping
             self.defs.clear()
@@ -164,12 +190,7 @@ class Listen(bpy.types.Operator):
             bpy.context.scene.op_tool.end = False
             #clear function mapping
             self.defs.clear()
-            print('MODAL')
             return {'FINISHED'}
-        elif event.type =='MOUSEMOVE':
-            #await asyncio.sleep(0.1)
-            self.execute(context)
-            time.sleep(0.1)
         return {'PASS_THROUGH'}
     
     def invoke(self, context, event):
@@ -178,54 +199,80 @@ class Listen(bpy.types.Operator):
         self.map_defs()
         print("invoked")
         #Setup OSC server
-        dispatcher = Dispatcher()
-        dispatcher.map("/start", self.start_handler, self, context)
-        dispatcher.map("/wek/outputs", self.category_handler, self, context)
-        dispatcher.map("/vec", self.vector_handler, self, context)
-        dispatcher.map("/end", self.end_handler, self, context)
-        ip = "127.0.0.1"
-        port = context.scene.panel_tool.osc
-        self.face.clear()
-        with self.get_bmesh(context.active_object) as bm:
-            rand = random.randint(0, len(bm.faces)-1)
-            bm.faces.ensure_lookup_table()
-            self.face.append(bm.faces[rand])
+        self.dispatcher = Dispatcher()
+        self.dispatcher.map("/start", self.start_handler, self, context)
+        self.dispatcher.map("/wek/outputs", self.category_handler, self, context)
+        self.dispatcher.map("/vec", self.vector_handler, self, context)
+        self.dispatcher.map("/end", self.end_handler, self, context)
+        self.ip = "127.0.0.1"
+        self.port = context.scene.panel_tool.osc
+        self.face = 0
+        self.strength = bpy.context.scene.op_tool.strength
+        self.coef = np.mean([context.active_object.dimensions.x, context.active_object.dimensions.y, context.active_object.dimensions.z])
+        with self.get_bmesh(context, context.active_object) as bm:
+            self.face = random.randint(0, len(bm.faces)-1)
         #run   
-        asyncio.run(self.init_main(port, dispatcher, self, context))
-        '''self.server = AsyncIOOSCUDPServer((ip, port), dispatcher, asyncio.get_event_loop())
-        self.server.serve()'''
+        asyncio.run(self.init_main(context))
         return {'RUNNING_MODAL'}
 
     def execute(self, context):
         self.defs[self.currclass](context)
         return {'RUNNING_MODAL'}
     
+    def select_face(self, context):
+        optool = bpy.context.scene.op_tool
+        with self.get_bmesh(context, context.active_object) as bm:
+            i = 0
+            origin = [0.0, 0.0, 0.0]
+            for v in bm.faces[self.face].verts:
+                origin[0] += v.co.x
+                origin[1] += v.co.y
+                origin[2] += v.co.z
+                i += 1
+            for o in origin:
+                o /= i
+            projected = origin + self.vec
+            closest = np.linalg.norm(self.vec) #need to change that once I implement strength
+            cloi = self.face
+            for j in range(len(bm.faces)):
+                n = 0
+                center = [0.0, 0.0, 0.0]
+                for w in bm.faces[j].verts:
+                    center[0] += w.co.x
+                    center[1] += w.co.y
+                    center[2] += w.co.z
+                    n += 1
+                for c in center:
+                    c /= n
+                dist = [projected[0]-center[0], projected[1]-center[1], projected[2]-center[2]]
+                dist = np.linalg.norm(dist)
+                if dist < closest:
+                    closest = dist
+                    cloi = i
+            self.face = cloi
+
+
     def move_face(self, context):
         optool = bpy.context.scene.op_tool
-        print("move")
-        with self.get_bmesh(context.active_object) as bm:
-            #bmesh.ops.translate(bm, vec=self.vec, verts=self.face[0].verts)
-            bm.faces.ensure_lookup_table()
-            bmesh.ops.translate(bm, vec=self.vec, verts=bm.faces[0].verts)
-            '''bm.normal_update()
-            bm.to_mesh(context.active_object.data)
-            context.active_object.data.update()
-            bm.free()'''
+        with self.get_bmesh(context, context.active_object) as bm:
+            bmesh.ops.translate(bm, vec=self.vec, verts=bm.faces[self.face].verts)
 
     def extrude_face(self, context):
-        print("extrude")
-        with self.get_bmesh(context.active_object) as bm:
-            bmesh.ops.extrude_discrete_faces(bm, faces=self.face, use_normal_flip=False, use_select_history=False)
-            bmesh.ops.translate(bm, vec=self.vec, verts=self.face[0].verts)
+        with self.get_bmesh(context, context.active_object) as bm:
+            bmesh.ops.extrude_discrete_faces(bm, faces=[bm.faces[self.face]], use_normal_flip=False, use_select_history=False)
+            bm.faces.ensure_lookup_table()
+            bmesh.ops.translate(bm, vec=self.vec, verts=bm.faces[self.face].verts)
 
     def vscale_face(self, context):
         print("vscale")
-        with self.get_bmesh(context.active_object) as bm:
-            bmesh.ops.scale(bm, vec=self.vec, verts=self.face[0].verts)
+        vec = self.vec
+        with self.get_bmesh(context, context.active_object) as bm:
+            bmesh.ops.scale(bm, vec=vec, verts=bm.faces[self.face].verts)
 
 class PanelProperties(bpy.types.PropertyGroup):
     osc: bpy.props.IntProperty(name= "OSC", default=12000)
     new_cat: bpy.props.StringProperty(name="", default="new_category")
+    strength: bpy.props.FloatVectorProperty(name="Strength", description="Strength coefficient for mesh operations (x, y, z)" ,default =[10.0, 10.0, 10.0])
     ops: bpy.props.EnumProperty(name="", description="List of mappable mesh operators", items = operations)
 
 class OperationProperties(bpy.types.PropertyGroup):
@@ -252,7 +299,9 @@ class MainPanel(bpy.types.Panel):
         row = self.layout.row()
         row.operator('listen.osc', text= "Listen", icon="ARMATURE_DATA")
         row.prop(mytool, "osc")
-        row.operator('mesh.primitive_cube_add', text= "", icon="PAUSE")
+        row.operator('dum.my', text= "", icon="PAUSE")
+        row = self.layout.row()
+        row.prop(mytool, "strength")
         row = self.layout.row()
         if(obj!=None):
             row.label(text='Object: '+obj.name, icon='CUBE')
@@ -308,7 +357,7 @@ class MapPanel(bpy.types.Panel):
                 m.label(text="", icon='ARROW_LEFTRIGHT')
                 r.label(text=categories[i])
 
-classes = [PanelProperties, OperationProperties, MainPanel, MapPanel, AddCategory, RemoveCategory, MapCategory, Listen]
+classes = [PanelProperties, OperationProperties, MainPanel, MapPanel, AddCategory, RemoveCategory, MapCategory, Listen, Dummy]
     
 def register():
     for cls in classes:
