@@ -9,10 +9,12 @@ import random
 import numpy as np
 import contextlib
 import time
+from mathutils import Matrix
+from math import radians
 from typing import List, Any
 
 def align_to_normal(vec, face):
-    return np.matmul(vec, rotation_matrix(face.normal, vec))
+    return np.matmul(vec, rotation_matrix(face.normal.to_tuple(), vec))
 
 def rotation_matrix(vec1, vec2):
     """ Find the rotation matrix that aligns vec1 to vec2
@@ -20,14 +22,33 @@ def rotation_matrix(vec1, vec2):
     :param vec2: A 3d "destination" vector
     :return mat: A transform matrix (3x3) which when applied to vec1, aligns it with vec2.
     """
-    a, b = (vec1 / np.linalg.norm(vec1)).reshape(3), (vec2 / np.linalg.norm(vec2)).reshape(3)
+    a, b = (vec1 / np.linalg.norm(vec1)), (vec2 / np.linalg.norm(vec2))
     v = np.cross(a, b)
     c = np.dot(a, b)
     s = np.linalg.norm(v)
     kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
     rotation_matrix = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s ** 2))
     return rotation_matrix
-    
+
+def face_center(face):
+    center = [0.0, 0.0, 0.0]
+    n = 0
+    for v in face.verts:
+        center[0] += v.co.x
+        center[1] += v.co.y
+        center[2] += v.co.z
+        n += 1
+    for c in center:
+        c /= n
+    return center
+
+def min_center_dist(face):
+    center = face_center(face)
+    dists = []
+    for v in face.verts:
+        dist = [v.co.x-center[0], v.co.y-center[1], v.co.z-center[2]]
+        dists.append(np.linalg.norm(dist))
+    return min(dists)
 
 categories = []
 operations = [("Move", "Move", "Move selected face along vector projected onto face normal"),("Uniform Scale", "Uniform Scale", "Uniformly scale selected face"),
@@ -109,17 +130,19 @@ class Listen(bpy.types.Operator):
 
     def __init__(self):
         self.diffreset=5
-        self.diffmax=3
+        self.diffmax=2
         self.samecount=0
         self.diffcount=self.diffmax-1
         self.currclass = 0
         self.vec = [0.0 ,0.0 ,0.0]
         self.face = 0
         self.defs=[]
-        self.mappings = {"Move": self.move_face, "Extrude": self.extrude_face, "Vector Scale": self.vscale_face, "Select": self.select_face}
+        self.mappings = {"Move": self.move_face, "Extrude": self.extrude_face, "Vector Scale": self.vscale_face, "Uniform Scale": self.uscale_face,
+                         "Select": self.select_face, "Rotate": self.rotate_face, "Inset": self.inset_face, "Smooth": self.smooth_face_region}
 
     @contextlib.contextmanager
-    def get_bmesh(self, context, obj):
+    def get_bmesh(self, context):
+        obj = context.active_object
         bm = bmesh.new()
         bm.from_mesh(obj.data)
         bm.faces.ensure_lookup_table()
@@ -207,9 +230,11 @@ class Listen(bpy.types.Operator):
         self.ip = "127.0.0.1"
         self.port = context.scene.panel_tool.osc
         self.face = 0
-        self.strength = bpy.context.scene.op_tool.strength
+        self.strength = [5*bpy.context.scene.panel_tool.strength[0], 5*bpy.context.scene.panel_tool.strength[1], 5*bpy.context.scene.panel_tool.strength[2]]
+        self.mustrength = np.mean(self.strength)
         self.coef = np.mean([context.active_object.dimensions.x, context.active_object.dimensions.y, context.active_object.dimensions.z])
-        with self.get_bmesh(context, context.active_object) as bm:
+        self.threshold = 0.05*self.coef*np.mean(self.strength)
+        with self.get_bmesh(context) as bm:
             self.face = random.randint(0, len(bm.faces)-1)
         #run   
         asyncio.run(self.init_main(context))
@@ -223,27 +248,13 @@ class Listen(bpy.types.Operator):
         optool = bpy.context.scene.op_tool
         with self.get_bmesh(context, context.active_object) as bm:
             i = 0
-            origin = [0.0, 0.0, 0.0]
-            for v in bm.faces[self.face].verts:
-                origin[0] += v.co.x
-                origin[1] += v.co.y
-                origin[2] += v.co.z
-                i += 1
-            for o in origin:
-                o /= i
+            origin = face_center(bm.faces[self.face])
             projected = origin + self.vec
             closest = np.linalg.norm(self.vec) #need to change that once I implement strength
             cloi = self.face
             for j in range(len(bm.faces)):
                 n = 0
-                center = [0.0, 0.0, 0.0]
-                for w in bm.faces[j].verts:
-                    center[0] += w.co.x
-                    center[1] += w.co.y
-                    center[2] += w.co.z
-                    n += 1
-                for c in center:
-                    c /= n
+                center = face_center(bm.faces[j])
                 dist = [projected[0]-center[0], projected[1]-center[1], projected[2]-center[2]]
                 dist = np.linalg.norm(dist)
                 if dist < closest:
@@ -254,25 +265,53 @@ class Listen(bpy.types.Operator):
 
     def move_face(self, context):
         optool = bpy.context.scene.op_tool
-        with self.get_bmesh(context, context.active_object) as bm:
+        with self.get_bmesh(context) as bm:
             bmesh.ops.translate(bm, vec=self.vec, verts=bm.faces[self.face].verts)
 
     def extrude_face(self, context):
-        with self.get_bmesh(context, context.active_object) as bm:
+        with self.get_bmesh(context) as bm:
             bmesh.ops.extrude_discrete_faces(bm, faces=[bm.faces[self.face]], use_normal_flip=False, use_select_history=False)
             bm.faces.ensure_lookup_table()
-            bmesh.ops.translate(bm, vec=self.vec, verts=bm.faces[self.face].verts)
+            bmesh.ops.translate(bm, vec=align_to_normal(self.vec, bm.faces[self.face]), verts=bm.faces[self.face].verts)
 
     def vscale_face(self, context):
-        print("vscale")
-        vec = self.vec
-        with self.get_bmesh(context, context.active_object) as bm:
+        vec = [abs((self.vec[0]+self.threshold)/self.threshold), abs((self.vec[1]+self.threshold)/self.threshold), abs((self.vec[2]+self.threshold)/self.threshold)] #little bit of hard coding, as a treat
+        with self.get_bmesh(context) as bm:
             bmesh.ops.scale(bm, vec=vec, verts=bm.faces[self.face].verts)
 
+    def uscale_face(self, context):
+        mu = np.mean(self.vec)
+        val = abs((mu+self.threshold)/self.threshold)
+        vec = [val, val, val]
+        with self.get_bmesh(context) as bm:
+            bmesh.ops.scale(bm, vec=vec, verts=bm.faces[self.face].verts)
+
+    def rotate_face(self, context):
+        with self.get_bmesh(context) as bm:
+            center = face_center(bm.faces[self.face])
+            norm = np.linalg.norm(self.vec)
+            invnorm = 1/norm
+            #axis = [self.vec[0]*invnorm, self.vec[1]*invnorm, self.vec[2]*invnorm]
+            axis= bm.faces[self.face].normal.normalized()
+            degs = radians(norm*180/(1.4142*self.coef*self.mustrength)) #1.4142=sqrt2. Somewhat limits rotation to 180 degs
+            rot = Matrix.Rotation(degs, 3, axis)
+            bmesh.ops.rotate(bm, cent=center, matrix=rot, verts=bm.faces[self.face].verts)
+
+    def inset_face(self, context):
+        with self.get_bmesh(context) as bm:
+            norm = np.linalg.norm(self.vec)
+            maxdist = min_center_dist(bm.faces[self.face])
+            dist = maxdist-maxdist**2/(maxdist+ norm**2-self.threshold**2) #Gives good results, plotted this in desmos to make sure
+            outset= norm > self.threshold
+            bmesh.ops.inset_region(bm, faces=[bm.faces[self.face]], thickness=dist, use_outset= outset)
+
+    def smooth_face_region(self, context):
+        with self.get_bmesh(context) as bm:
+            bmesh.ops.smooth_vert(bm, verts=bm.faces[self.face].verts, factor=np.linalg.norm(self.vec))
 class PanelProperties(bpy.types.PropertyGroup):
     osc: bpy.props.IntProperty(name= "OSC", default=12000)
     new_cat: bpy.props.StringProperty(name="", default="new_category")
-    strength: bpy.props.FloatVectorProperty(name="Strength", description="Strength coefficient for mesh operations (x, y, z)" ,default =[10.0, 10.0, 10.0])
+    strength: bpy.props.FloatVectorProperty(name="Strength", description="Strength coefficient for mesh operations (x, y, z)" ,default =[1.0, 1.0, 1.0])
     ops: bpy.props.EnumProperty(name="", description="List of mappable mesh operators", items = operations)
 
 class OperationProperties(bpy.types.PropertyGroup):
