@@ -155,7 +155,7 @@ class Listen(bpy.types.Operator):
 
     def category_handler(address: str, fixed_argument: List[Any], *osc_arguments: List[Any]) -> None:
         self, context = osc_arguments[0] 
-        i = int(osc_arguments[1]-1)
+        i = int(osc_arguments[1])
         if i==self.currclass:
             self.samecount+=1
             if self.samecount==self.diffreset:
@@ -186,7 +186,7 @@ class Listen(bpy.types.Operator):
             await asyncio.sleep(1)
         mytool.start = False
         while not mytool.end:
-            await asyncio.sleep(0.06)
+            await asyncio.sleep(0.01)
             self.modal(context, None)
 
     async def init_main(self, context):
@@ -211,6 +211,12 @@ class Listen(bpy.types.Operator):
             return {'CANCELLED'}
         elif bpy.context.scene.op_tool.end:
             bpy.context.scene.op_tool.end = False
+            bpy.ops.object.modifier_add(type='SUBSURF')
+            # Access the last added modifier (which is the Subdivision Surface modifier)
+            modifier = context.active_object.modifiers[-1]
+            # Set the number of subdivisions
+            modifier.levels = 3  # Adjust the number of subdivisions as needed
+            modifier.render_levels = 3  # Adjust the render subdivisions as needed
             #clear function mapping
             self.defs.clear()
             return {'FINISHED'}
@@ -219,6 +225,7 @@ class Listen(bpy.types.Operator):
     def invoke(self, context, event):
         #map functions for execution
         context.window_manager.modal_handler_add(self)
+        self.numclasses = len(categories)
         self.map_defs()
         print("invoked")
         #Setup OSC server
@@ -233,7 +240,7 @@ class Listen(bpy.types.Operator):
         self.strength = [5*bpy.context.scene.panel_tool.strength[0], 5*bpy.context.scene.panel_tool.strength[1], 5*bpy.context.scene.panel_tool.strength[2]]
         self.mustrength = np.mean(self.strength)
         self.coef = np.mean([context.active_object.dimensions.x, context.active_object.dimensions.y, context.active_object.dimensions.z])
-        self.threshold = 0.05*self.coef*np.mean(self.strength)
+        self.threshold = bpy.context.scene.panel_tool.threshold*self.coef*np.mean(self.strength)
         with self.get_bmesh(context) as bm:
             self.face = random.randint(0, len(bm.faces)-1)
         #run   
@@ -241,13 +248,12 @@ class Listen(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def execute(self, context):
-        self.defs[self.currclass](context)
+        self.defs[self.currclass%self.numclasses-1](context)
         return {'RUNNING_MODAL'}
     
     def select_face(self, context):
         optool = bpy.context.scene.op_tool
-        with self.get_bmesh(context, context.active_object) as bm:
-            i = 0
+        with self.get_bmesh(context) as bm:
             origin = face_center(bm.faces[self.face])
             projected = origin + self.vec
             closest = np.linalg.norm(self.vec) #need to change that once I implement strength
@@ -259,7 +265,7 @@ class Listen(bpy.types.Operator):
                 dist = np.linalg.norm(dist)
                 if dist < closest:
                     closest = dist
-                    cloi = i
+                    cloi = j
             self.face = cloi
 
 
@@ -313,6 +319,7 @@ class PanelProperties(bpy.types.PropertyGroup):
     new_cat: bpy.props.StringProperty(name="", default="new_category")
     strength: bpy.props.FloatVectorProperty(name="Strength", description="Strength coefficient for mesh operations (x, y, z)" ,default =[1.0, 1.0, 1.0])
     ops: bpy.props.EnumProperty(name="", description="List of mappable mesh operators", items = operations)
+    threshold: bpy.props.FloatProperty(name="Treshold", default=0.1)
 
 class OperationProperties(bpy.types.PropertyGroup):
     start :bpy.props.BoolProperty(name="", default=False)
@@ -341,6 +348,8 @@ class MainPanel(bpy.types.Panel):
         row.operator('dum.my', text= "", icon="PAUSE")
         row = self.layout.row()
         row.prop(mytool, "strength")
+        row = self.layout.row()
+        row.prop(mytool, "threshold")
         row = self.layout.row()
         if(obj!=None):
             row.label(text='Object: '+obj.name, icon='CUBE')
